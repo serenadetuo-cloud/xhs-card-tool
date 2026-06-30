@@ -1,0 +1,6 @@
+{
+  "name": "小红书卡片排版工具",
+  "description": "高颜值、AI赋能的小红书图文卡片排版与设计工具，提供丰富模板、智能AI排版、敏感词检测、字号调整与一键导出图片等功能。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
