@@ -11,6 +11,133 @@ interface AIPanelProps {
   modelConfig: ModelConfig;
 }
 
+// 构建 Gemini API 完整 URL
+const buildGeminiUrl = (model: string, apiKey: string, baseUrl?: string): string => {
+  const base = baseUrl && baseUrl.trim()
+    ? baseUrl.trim().replace(/\/+$/, "")
+    : "https://generativelanguage.googleapis.com";
+  return `${base}/v1beta/models/${model}:generateContent?key=${apiKey}`;
+};
+
+// 调用 Gemini API
+const callGemini = async (prompt: string, modelConfig: ModelConfig, temperature: number = 0.7): Promise<string> => {
+  const { apiKey, model, baseUrl } = modelConfig;
+
+  if (!apiKey || !apiKey.trim()) {
+    throw new Error("请先在下方「AI 模型配置」中填写 Gemini API Key");
+  }
+
+  const url = buildGeminiUrl(model || "gemini-2.5-flash", apiKey, baseUrl);
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature,
+        maxOutputTokens: 4096,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    let errorMsg = `Gemini API 返回错误 ${response.status}`;
+    try {
+      const errData = await response.json();
+      if (errData.error?.message) errorMsg = errData.error.message;
+    } catch {}
+    throw new Error(errorMsg);
+  }
+
+  const data = await response.json();
+  const result = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (!result) {
+    throw new Error("Gemini API 返回结果为空，可能是内容被安全过滤，请修改文案后重试");
+  }
+
+  return result;
+};
+
+// AI 一键分页
+const callGeminiForPaginate = async (text: string, aspectRatio: string, modelConfig: ModelConfig): Promise<string> => {
+  const prompt = `你是一个专业的小红书爆款文案排版助手。
+请将以下文案按照小红书图文笔记的最佳实践进行智能分页与排版。
+
+【要求】
+1. 根据画布比例（${aspectRatio}），合理拆分文案为多张卡片内容
+2. 每张卡片内容要完整、有逻辑，不要截断句子
+3. 用 --- 分隔不同卡片的内容
+4. 保持原文的核心信息和语气
+5. 适当加粗重点内容（用 **文字** 格式）
+6. 用 ==荧光笔== 标记金句或核心观点
+
+【原文案】
+${text}
+
+【输出格式】
+只输出排版后的文案，用 --- 分隔卡片，不要输出其他解释。`;
+
+  return await callGemini(prompt, modelConfig, 0.7);
+};
+
+// AI 合规检测
+const callGeminiForCheck = async (text: string, modelConfig: ModelConfig): Promise<ComplianceReport> => {
+  const prompt = `你是一个专业的小红书内容合规审核专家。
+请检测以下文案中是否包含小红书平台的敏感词、违禁词或可能违规的内容。
+
+【小红书常见违规内容】
+- 绝对化用语：最、第一、唯一、顶级、极致、100%、国家级等
+- 诱导互动：关注、点赞、评论、私信、加微信、拉群等
+- 医疗功效：治疗、治愈、药用、抗炎、抗菌等
+- 虚假宣传：秒杀、清仓、全网最低、史无前例等
+- 敏感话题：政治、宗教、色情、暴力等
+
+【原文案】
+${text}
+
+【输出格式】
+如果检测到违规内容，请以 JSON 格式输出：
+{
+  "hasViolations": true,
+  "violations": [
+    {
+      "word": "违规词",
+      "reason": "违规原因",
+      "suggestion": "替换建议"
+    }
+  ]
+}
+
+如果没有检测到违规内容，输出：
+{
+  "hasViolations": false,
+  "violations": []
+}
+
+只输出 JSON，不要输出其他解释。`;
+
+  const result = await callGemini(prompt, modelConfig, 0.3);
+
+  // 解析 JSON（可能需要从 markdown 代码块中提取）
+  let jsonStr = result.trim();
+  if (jsonStr.startsWith("```")) {
+    const match = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (match) jsonStr = match[1].trim();
+  }
+
+  try {
+    const report = JSON.parse(jsonStr);
+    return {
+      hasViolations: report.hasViolations || false,
+      violations: report.violations || [],
+    };
+  } catch {
+    return { hasViolations: false, violations: [] };
+  }
+};
+
 export const AIPanel: React.FC<AIPanelProps> = ({
   textContent,
   onUpdateContent,
@@ -19,95 +146,52 @@ export const AIPanel: React.FC<AIPanelProps> = ({
   aspectRatio,
   modelConfig,
 }) => {
-  const [loading, setLoading] = useState<string | null>(null); // name of active action, or null
+  const [loading, setLoading] = useState<string | null>(null);
   const [report, setReport] = useState<ComplianceReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // One-click Pagination and Formatting
   const handlePaginate = async () => {
     if (!textContent.trim()) return;
     setLoading("paginate");
     setReport(null);
     setError(null);
     try {
-      const res = await fetch("/api/ai/paginate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: textContent, aspectRatio, modelConfig }),
-      });
-      
-      const data = await res.json();
-      
-      if (!res.ok) {
-        throw new Error(data.error || `请求失败，服务器返回了状态码 ${res.status}`);
-      }
-
-      if (data.paginatedText) {
-        // Safe-guard content state updates: make sure we always pass a clean string to state.
-        if (typeof data.paginatedText === "string") {
-          onUpdateContent(data.paginatedText);
-        } else if (Array.isArray(data.paginatedText)) {
-          onUpdateContent(data.paginatedText.join("\n---\n"));
-        } else if (typeof data.paginatedText === "object") {
-          const values = Object.values(data.paginatedText).map(v => typeof v === 'string' ? v : JSON.stringify(v));
-          onUpdateContent(values.join("\n---\n"));
-        } else {
-          onUpdateContent(String(data.paginatedText));
-        }
-      } else {
-        throw new Error("模型接口返回的数据中未包含分页文本(paginatedText)，请检查模型是否支持输出该格式");
-      }
+      const result = await callGeminiForPaginate(textContent, aspectRatio, modelConfig);
+      onUpdateContent(result);
     } catch (e: any) {
       console.error(e);
-      setError(e.message || "请求发生未知错误，请检查 API Key、接口地址和网络。");
+      setError(e.message || "AI 分页请求失败，请检查 API Key 和网络连接。");
     } finally {
       setLoading(null);
     }
   };
 
-  // Check Sensitive words (Compliance Checking)
   const handleCheck = async () => {
     if (!textContent.trim()) return;
     setLoading("check");
     setReport(null);
     setError(null);
     try {
-      const res = await fetch("/api/ai/check", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: textContent, modelConfig }),
-      });
-      
-      const data = await res.json();
-      
-      if (!res.ok) {
-        throw new Error(data.error || `请求失败，服务器返回了状态码 ${res.status}`);
-      }
-
-      setReport({
-        hasViolations: data.hasViolations || false,
-        violations: data.violations || [],
-      });
+      const result = await callGeminiForCheck(textContent, modelConfig);
+      setReport(result);
     } catch (e: any) {
       console.error(e);
-      setError(e.message || "合规检测请求失败，请检查 API Key 和接口地址配置。");
+      setError(e.message || "合规检测请求失败，请检查 API Key 和网络连接。");
     } finally {
       setLoading(null);
     }
   };
 
-  // Replace a sensitive word in current content
   const replaceWord = (word: string, replacement: string) => {
-    const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const newContent = textContent.replace(new RegExp(escapedWord, "g"), replacement);
     onUpdateContent(newContent);
-    
-    // update report state directly to reflect fixed violation
+
     if (report) {
-      const filtered = report.violations.filter(v => v.word !== word);
+      const filtered = report.violations.filter((v) => v.word !== word);
       setReport({
         hasViolations: filtered.length > 0,
-        violations: filtered
+        violations: filtered,
       });
     }
   };
@@ -117,17 +201,15 @@ export const AIPanel: React.FC<AIPanelProps> = ({
       <div className="flex items-center justify-between">
         <h4 className="text-sm font-semibold text-neutral-800 flex items-center space-x-1.5">
           <Sparkles className="w-4 h-4 text-amber-500 animate-pulse" />
-          <span>Gemini 爆款 AI 写作协同</span>
+          <span>Gemini AI 写作协同</span>
         </h4>
         <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-600">
-          已连接 {modelConfig.provider === "gemini" ? "Gemini" : "OpenAI"} ({modelConfig.model})
+          {modelConfig.apiKey ? `${modelConfig.model || "gemini-2.5-flash"}` : "未配置 Key"}
         </span>
       </div>
 
-      {/* Primary Quick AI Actions */}
       <div className="grid grid-cols-2 gap-2">
         <button
-          id="btn-ai-paginate"
           onClick={handlePaginate}
           disabled={loading !== null || !textContent.trim()}
           className="flex items-center justify-center space-x-1.5 py-2.5 px-3 rounded-lg text-xs font-bold bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-50 transition-all cursor-pointer shadow-sm shadow-amber-500/10"
@@ -142,7 +224,6 @@ export const AIPanel: React.FC<AIPanelProps> = ({
         </button>
 
         <button
-          id="btn-ai-check"
           onClick={handleCheck}
           disabled={loading !== null || !textContent.trim()}
           className="flex items-center justify-center space-x-1.5 py-2.5 px-3 rounded-lg text-xs font-bold bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100 disabled:opacity-50 transition-all cursor-pointer shadow-sm"
@@ -157,7 +238,6 @@ export const AIPanel: React.FC<AIPanelProps> = ({
         </button>
       </div>
 
-      {/* Compliance / Sensitive Word Checking Report Card */}
       {report && (
         <div className="border-t border-neutral-200/60 pt-3 space-y-2">
           <div className="flex items-center space-x-1.5">
@@ -167,20 +247,24 @@ export const AIPanel: React.FC<AIPanelProps> = ({
               <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0" />
             )}
             <span className="text-xs font-semibold text-neutral-800">
-              {report.hasViolations ? `检测到 ${report.violations.length} 个不合规词汇` : "未检测到敏感或违规词汇！"}
+              {report.hasViolations
+                ? `检测到 ${report.violations.length} 个不合规词汇`
+                : "未检测到敏感或违规词汇！"}
             </span>
           </div>
 
           {report.hasViolations && (
             <div className="max-h-48 overflow-y-auto space-y-2 pr-1">
               {report.violations.map((v, i) => (
-                <div key={i} className="bg-rose-50/50 border border-rose-100 rounded-lg p-2 text-[11px] space-y-1">
+                <div
+                  key={i}
+                  className="bg-rose-50/50 border border-rose-100 rounded-lg p-2 text-[11px] space-y-1"
+                >
                   <div className="flex items-center justify-between">
                     <span className="font-semibold text-rose-700 bg-rose-100/70 px-1.5 py-0.5 rounded">
                       "{v.word}"
                     </span>
                     <button
-                      id={`btn-ai-replace-${i}`}
                       onClick={() => replaceWord(v.word, v.suggestion)}
                       className="text-[10px] font-semibold text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100/80 px-2 py-0.5 rounded cursor-pointer transition-colors border border-emerald-200"
                     >

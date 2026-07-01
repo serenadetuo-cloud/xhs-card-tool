@@ -42,7 +42,7 @@ export default function App() {
           provider: "gemini",
           apiKey: parsed.apiKey || "",
           baseUrl: parsed.baseUrl || "",
-          model: isGeminiModel ? parsed.model : "gemini-3.5-flash"
+          model: isGeminiModel ? parsed.model : "gemini-2.5-flash"
         };
       }
     } catch (e) {
@@ -52,7 +52,7 @@ export default function App() {
       provider: "gemini",
       apiKey: "",
       baseUrl: "",
-      model: "gemini-3.5-flash"
+      model: "gemini-2.5-flash"
     };
   });
 
